@@ -1,5 +1,12 @@
 name: Prepare patched upstream
-description: Check out the pinned DEEIX-Chat commit and apply the Pro patch set.
+description: Check out a resolved DEEIX-Chat release and apply the Pro patch set.
+inputs:
+  upstream_sha:
+    description: Resolved upstream commit (empty uses the local baseline)
+    default: ''
+  upstream_tag:
+    description: Resolved upstream release tag (required with upstream_sha)
+    default: ''
 outputs:
   sha:
     description: Upstream commit SHA
@@ -10,7 +17,10 @@ runs:
     - name: Resolve upstream manifest
       id: resolve
       shell: bash
-      run: python3 scripts/resolve_upstream.py >> "$GITHUB_OUTPUT"
+      env:
+        UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+      run: python3 scripts/resolve_upstream.py --sha "$UPSTREAM_SHA" --tag "$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
     - name: Checkout upstream
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -18,6 +28,12 @@ runs:
         ref: ${{ steps.resolve.outputs.sha }}
         path: .upstream/DEEIX-Chat
         persist-credentials: false
+    - name: Verify release source and version
+      shell: bash
+      env:
+        UPSTREAM_SHA: ${{ steps.resolve.outputs.sha }}
+        UPSTREAM_TAG: ${{ steps.resolve.outputs.tag }}
+      run: python3 scripts/resolve_upstream.py --sha "$UPSTREAM_SHA" --tag "$UPSTREAM_TAG" --verify-tree .upstream/DEEIX-Chat
     - name: Check and apply patches
       shell: bash
       run: |

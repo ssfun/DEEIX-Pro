@@ -22,7 +22,7 @@
 
 ```bash
 git clone https://github.com/DEEIX-AI/DEEIX-Chat.git .upstream/DEEIX-Chat
-git -C .upstream/DEEIX-Chat checkout 6a39b0eeb8cd68c85aa2d19aad3b3a44ae5de0fc
+git -C .upstream/DEEIX-Chat checkout 08e1f8bbca29ef89b4c8002df1db8b2a3583c420
 python3 scripts/apply_upstream_patches.py --check .upstream/DEEIX-Chat
 python3 scripts/apply_upstream_patches.py .upstream/DEEIX-Chat
 ```
@@ -49,7 +49,9 @@ scripts/validate.sh .upstream/DEEIX-Chat
 
 ## GitHub Actions
 
-所有工作流从 `upstream.json` 读取固定提交，拉取上游后应用补丁；构建上下文为生成的 `.upstream/DEEIX-Chat`。
+CI 和发布均在开始时查询上游最新正式 Release，解析标签对应的真实提交 SHA，再将同一个 SHA 传给验证和两种架构的构建。镜像标签直接使用上游 Release 标签（例如 `v0.4.2`），不使用本仓库的 Git 标签或提交号，也无需手填版本。构建时核对上游 `VERSION`，不一致或补丁不兼容则停止发布。
+
+`upstream.json` 保留上游仓库地址和本地复现基准；Actions 使用最新正式 Release，不会自动回退到旧基准。构建上下文为生成的 `.upstream/DEEIX-Chat`。
 
 - **Validate DEEIX-Pro**：PR、推送 `main` 或手动触发；执行补丁、计费、API 契约及类型检查，再分别在原生 amd64／arm64 runner 上构建 Docker 镜像。CI 不发布镜像，PR 不需要 Docker Hub 凭证。
 - **Publish Docker Hub**：推送 `v*` 标签或手动触发；先通过同一套验证，再构建并推送两种架构，按本次构建的 digest 合并为多架构镜像。某一架构失败时不发布最终标签。
@@ -62,14 +64,9 @@ scripts/validate.sh .upstream/DEEIX-Chat
 | Secret | `DOCKERHUB_TOKEN` | 对目标镜像仓库有写入权限的访问令牌 |
 | Variable（可选） | `DOCKERHUB_IMAGE` | `命名空间/镜像名`，例如 `ssfun/deeix-pro`；默认是用户名加当前 GitHub 仓库名的小写形式 |
 
-发布示例：
+在 Actions 中手动运行 **Publish Docker Hub** 即可构建上游最新版。推送本仓库的 `v*` 标签仍可触发发布，但该标签仅作为触发入口，不影响镜像版本号。只有手动勾选 `publish_latest` 才额外更新 `latest`。
 
-```bash
-git tag v0.4.2-pro.1
-git push origin v0.4.2-pro.1
-```
-
-标签触发时保留完整 Git 标签作为镜像标签，例如 `ssfun/deeix-pro:v0.4.2-pro.1`。手动运行 **Publish Docker Hub** 时可指定 `image_tag`；留空则使用所选 Git 标签，或分支提交对应的 `sha-<12位提交>`。只有手动勾选 `publish_latest` 才更新 `latest`。
+例如上游最新 Release 是 `v0.4.2`，发布结果就是 `ssfun/deeix-pro:v0.4.2`。同一上游版本下修改补丁并重新发布，会更新该版本标签；镜像内的 Pro 提交元数据可区分具体构建。
 
 工作流复用上游 Dockerfile，保留 LICENSE／NOTICE；镜像元数据记录 Pro 提交和上游提交，便于追溯。依赖缓存与按架构划分的 BuildKit 缓存用于减少重复构建。两个发布任务不会并行执行，以避免同时覆盖发布标签。
 

@@ -1,6 +1,13 @@
 name: Validate patches
 on:
   workflow_call:
+    inputs:
+      upstream_sha:
+        type: string
+        required: true
+      upstream_tag:
+        type: string
+        required: true
 permissions:
   contents: read
 jobs:
@@ -12,6 +19,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/prepare-upstream
+        with:
+          upstream_sha: ${{ inputs.upstream_sha }}
+          upstream_tag: ${{ inputs.upstream_tag }}
+      - name: Test release resolution
+        run: python3 -m unittest discover -s tests -p 'test_resolve_upstream.py'
       - name: Test patch application and drift refusal
         run: python3 tests/test_apply.py .upstream/DEEIX-Chat
       - uses: pnpm/action-setup@v4
