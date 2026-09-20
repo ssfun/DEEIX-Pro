@@ -32,10 +32,18 @@ class ApplyTests(unittest.TestCase):
             self.assertNotEqual(before, patched)
             self.assertEqual(run().returncode, 0)
             self.assertEqual(snapshot(), patched)
-            subprocess.run(['git', '-C', directory, 'apply', '--reverse', str(ROOT / 'patches/0001-subscription-day.patch')], check=True)
+            subprocess.run(['git', '-C', directory, 'apply', '--reverse', *[str(p) for p in sorted((ROOT / 'patches').glob('*.patch'), reverse=True)]], check=True)
             self.assertEqual(snapshot(), before)
-            source = target / 'backend/internal/domain/billing/types.go'
-            source.write_text(source.read_text().replace('case IntervalYear:', 'case "changed-upstream":'))
+            # Upgrade an existing checkout that only has the original day patch.
+            subprocess.run(['git', '-C', directory, 'apply', str(ROOT / 'patches/0001-subscription-day.patch')], check=True)
+            day_only = snapshot()
+            self.assertEqual(run('--check').returncode, 0)
+            self.assertEqual(snapshot(), day_only)
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(snapshot(), patched)
+            subprocess.run(['git', '-C', directory, 'apply', '--reverse', *[str(p) for p in sorted((ROOT / 'patches').glob('*.patch'), reverse=True)]], check=True)
+            source = target / 'Dockerfile'
+            source.write_text(source.read_text().replace('CMD ["/app/deeix-chat"]', 'CMD ["/app/changed-upstream"]'))
             drifted = snapshot()
             self.assertNotEqual(run().returncode, 0)
             self.assertEqual(snapshot(), drifted)

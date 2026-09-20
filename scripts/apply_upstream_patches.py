@@ -12,21 +12,30 @@ def apply(target: Path, check: bool = False) -> None:
     target = target.resolve()
     if not (target / 'backend/go.mod').is_file() or not (target / 'frontend/package.json').is_file():
         raise ValueError(f'Not a DEEIX-Chat source tree: {target}')
-    patch = ROOT / 'patches/0001-subscription-day.patch'
+    patches = sorted((ROOT / 'patches').glob('*.patch'))
+    if not patches:
+        raise ValueError('No upstream patches found')
     command = ['git', '-C', str(target), 'apply']
-    result = subprocess.run(command + ['--check', str(patch)], capture_output=True, text=True)
-    if result.returncode:
+    pending = []
+    for patch in patches:
+        result = subprocess.run(command + ['--check', str(patch)], capture_output=True, text=True)
+        if result.returncode == 0:
+            pending.append(str(patch))
+            continue
         reverse = subprocess.run(command + ['--reverse', '--check', str(patch)], capture_output=True, text=True)
-        if reverse.returncode == 0:
-            print('DEEIX-Pro: day subscription patch already applied')
-            return
-        raise ValueError('Upstream differs from the supported patch context, or is partially patched. '
-                         'No changes applied.\n' + result.stderr)
+        if reverse.returncode != 0:
+            raise ValueError(f'{patch.name}: upstream differs from the supported patch context, '
+                             'or is partially patched. No changes applied.\n' + result.stderr)
+    if not pending:
+        print('DEEIX-Pro: all patches already applied')
+        return
+    # Preflight the entire pending set before making any changes.
+    subprocess.run(command + ['--check', *pending], check=True)
     if check:
-        print('DEEIX-Pro: day subscription patch can be applied')
+        print(f'DEEIX-Pro: {len(pending)} patch(es) can be applied')
     else:
-        subprocess.run(command + [str(patch)], check=True)
-        print('DEEIX-Pro: day subscription patch applied')
+        subprocess.run(command + pending, check=True)
+        print(f'DEEIX-Pro: applied {len(pending)} patch(es)')
 
 
 def main() -> int:

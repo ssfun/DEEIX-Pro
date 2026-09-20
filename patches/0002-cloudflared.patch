@@ -1,0 +1,73 @@
+diff --git a/Dockerfile b/Dockerfile
+index 6b945cd..f5c1d7b 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -82,6 +82,8 @@ COPY --from=runtime-deps /etc/timezone /etc/timezone
+ COPY --from=backend-builder /out/deeix-chat /app/deeix-chat
+ COPY --from=frontend-builder /src/frontend/out /app/frontend/out
+ COPY LICENSE NOTICE /app/licenses/DEEIX-Chat/
++COPY --from=cloudflare/cloudflared:latest /usr/local/bin/cloudflared /usr/local/bin/cloudflared
++COPY --chmod=755 docker/pro-entrypoint.sh /usr/local/bin/pro-entrypoint.sh
+ 
+ ENV FRONTEND_DIST_DIR=/app/frontend/out
+ 
+@@ -89,4 +91,5 @@ EXPOSE 8080
+ 
+ VOLUME ["/app/storage", "/app/data"]
+ 
++ENTRYPOINT ["/usr/local/bin/pro-entrypoint.sh"]
+ CMD ["/app/deeix-chat"]
+diff --git a/docker/pro-entrypoint.sh b/docker/pro-entrypoint.sh
+new file mode 100644
+index 0000000..cc8beb7
+--- /dev/null
++++ b/docker/pro-entrypoint.sh
+@@ -0,0 +1,48 @@
++#!/bin/bash
++set -euo pipefail
++
++if [[ -z "${CF_TOKEN:-}" ]]; then
++  exec "$@"
++fi
++
++app_pid=''
++tunnel_pid=''
++cleanup() {
++  trap '' TERM INT
++  local pid
++  for pid in "$app_pid" "$tunnel_pid"; do
++    if [[ -n "$pid" ]]; then
++      kill -TERM "$pid" 2>/dev/null || true
++    fi
++  done
++  # Bound shutdown even if a child ignores SIGTERM.
++  for ((attempt = 0; attempt < 50; attempt++)); do
++    if ! kill -0 "$app_pid" 2>/dev/null && ! kill -0 "$tunnel_pid" 2>/dev/null; then
++      break
++    fi
++    sleep 0.1
++  done
++  for pid in "$app_pid" "$tunnel_pid"; do
++    if [[ -n "$pid" ]]; then
++      kill -KILL "$pid" 2>/dev/null || true
++      wait "$pid" 2>/dev/null || true
++    fi
++  done
++}
++trap cleanup EXIT
++trap 'exit 143' TERM
++trap 'exit 130' INT
++
++"$@" &
++app_pid=$!
++cloudflared --no-autoupdate tunnel run --token "$CF_TOKEN" &
++tunnel_pid=$!
++
++status=0
++finished_pid=''
++wait -n -p finished_pid "$app_pid" "$tunnel_pid" || status=$?
++# A tunnel that exits successfully is still no longer serving the application.
++if [[ "$finished_pid" == "$tunnel_pid" && "$status" == 0 ]]; then
++  status=1
++fi
++exit "$status"

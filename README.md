@@ -16,6 +16,24 @@
 
 周期字段原本为字符串，新增取值无需数据库结构迁移。日方案上线后回退到原版上游会把 `day` 识别为默认月周期，因此已有日方案的数据应继续使用支持日周期的版本。
 
+## Cloudflare Tunnel
+
+运行镜像内置官方 `cloudflare/cloudflared:latest` 的 `cloudflared`。设置运行时环境变量 `CF_TOKEN` 后，容器同时运行 DEEIX-Chat 和：
+
+```bash
+cloudflared --no-autoupdate tunnel run --token "$CF_TOKEN"
+```
+
+例如先在本机环境设置令牌，再启动镜像（其他存储、端口与应用配置沿用上游）：
+
+```bash
+docker run -d --name deeix-pro --restart unless-stopped -e CF_TOKEN ssfun/deeix-pro:v0.4.2
+```
+
+在 Cloudflare Tunnel 控制台将服务地址设置为 `http://localhost:8080`。没有设置 `CF_TOKEN` 或值为空时，只启动 DEEIX-Chat。令牌只在容器运行时传入，无需写入镜像或 Dockerfile。
+
+容器收到停止信号时会通知两个进程退出，最多等待 5 秒；任一进程退出会清理另一个进程。隧道进程退出视为失败，由 Docker 的重启策略恢复整个容器。cloudflared 自身的临时断线重连仍由其内部处理。
+
 ## 应用补丁
 
 基准为上游 `0.4.2`，固定提交见 [upstream.json](upstream.json)。要求 Python 3、Git；构建依赖遵循上游 README。
@@ -27,7 +45,7 @@ python3 scripts/apply_upstream_patches.py --check .upstream/DEEIX-Chat
 python3 scripts/apply_upstream_patches.py .upstream/DEEIX-Chat
 ```
 
-脚本重复运行会识别已应用状态；上下文不匹配或只应用了一部分时失败退出，不强制覆盖。升级上游时先在新 checkout 中检查、应用并验证，再更新基准。不要直接改生成目录作为长期维护方案。
+脚本按编号检查所有补丁，已应用的补丁会跳过，新增补丁会补齐；某个补丁上下文不匹配或内容只应用了一部分时失败退出，不强制覆盖。升级上游时先在新 checkout 中检查、应用并验证，再更新基准。不要直接改生成目录作为长期维护方案。
 
 应用后按上游方式构建，例如在本仓库根目录执行：
 
@@ -53,7 +71,7 @@ CI 和发布均在开始时查询上游最新正式 Release，解析标签对应
 
 `upstream.json` 保留上游仓库地址和本地复现基准；Actions 使用最新正式 Release，不会自动回退到旧基准。构建上下文为生成的 `.upstream/DEEIX-Chat`。
 
-- **Validate DEEIX-Pro**：PR、推送 `main` 或手动触发；执行补丁、计费、API 契约及类型检查，再分别在原生 amd64／arm64 runner 上构建 Docker 镜像。CI 不发布镜像，PR 不需要 Docker Hub 凭证。
+- **Validate DEEIX-Pro**：PR、推送 `main` 或手动触发；执行补丁、计费、API 契约及类型检查，再分别在原生 amd64／arm64 runner 上构建 Docker 镜像。构建后验证 cloudflared 二进制、环境变量及容器退出行为。CI 不发布镜像，PR 不需要 Docker Hub 凭证。
 - **Publish Docker Hub**：推送 `v*` 标签或手动触发；先通过同一套验证，再构建并推送两种架构，按本次构建的 digest 合并为多架构镜像。某一架构失败时不发布最终标签。
 
 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 配置：
@@ -73,6 +91,7 @@ CI 和发布均在开始时查询上游最新正式 Release，解析标签对应
 ## 文件
 
 - `patches/0001-subscription-day.patch`：完整业务修改、生成契约和 Go 回归测试。
+- `patches/0002-cloudflared.patch`：cloudflared 镜像集成与双进程启动入口。
 - `scripts/apply_upstream_patches.py`：可重复执行的补丁入口。
 - `scripts/validate.sh`：对生成后的上游树执行验证。
 - `tests/test_apply.py`：补丁应用行为验证。
