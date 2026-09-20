@@ -1,0 +1,34 @@
+name: Resolve Docker Hub image
+description: Resolve the image within each job so secret masking cannot discard a cross-job output.
+inputs:
+  username:
+    description: Docker Hub username
+    required: true
+  image:
+    description: Optional namespace/repository override
+    default: ''
+outputs:
+  image:
+    description: Docker Hub image name for steps in this job only
+    value: ${{ steps.image.outputs.image }}
+runs:
+  using: composite
+  steps:
+    - id: image
+      shell: bash
+      env:
+        DOCKERHUB_USERNAME: ${{ inputs.username }}
+        IMAGE_NAME: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$DOCKERHUB_USERNAME" ]]; then
+          echo '::error::Configure the DOCKERHUB_USERNAME secret.'
+          exit 1
+        fi
+        image="${IMAGE_NAME:-${DOCKERHUB_USERNAME}/${GITHUB_REPOSITORY#*/}}"
+        image="${image,,}"
+        if [[ ! "$image" =~ ^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+          echo '::error::DOCKERHUB_IMAGE must be namespace/repository.'
+          exit 1
+        fi
+        echo "image=$image" >> "$GITHUB_OUTPUT"
