@@ -1,0 +1,49 @@
+name: Validate DEEIX-Pro
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+  build:
+    name: Build image (${{ matrix.arch }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-upstream
+        id: upstream
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build patched upstream image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .upstream/DEEIX-Chat
+          file: .upstream/DEEIX-Chat/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.deeix-pro.upstream.revision=${{ steps.upstream.outputs.sha }}
+          cache-from: type=gha,scope=deeix-pro-${{ matrix.arch }}
+          cache-to: type=gha,scope=deeix-pro-${{ matrix.arch }},mode=max

@@ -1,0 +1,25 @@
+name: Prepare patched upstream
+description: Check out the pinned DEEIX-Chat commit and apply the Pro patch set.
+outputs:
+  sha:
+    description: Upstream commit SHA
+    value: ${{ steps.resolve.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve upstream manifest
+      id: resolve
+      shell: bash
+      run: python3 scripts/resolve_upstream.py >> "$GITHUB_OUTPUT"
+    - name: Checkout upstream
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ steps.resolve.outputs.repository }}
+        ref: ${{ steps.resolve.outputs.sha }}
+        path: .upstream/DEEIX-Chat
+        persist-credentials: false
+    - name: Check and apply patches
+      shell: bash
+      run: |
+        python3 scripts/apply_upstream_patches.py --check .upstream/DEEIX-Chat
+        python3 scripts/apply_upstream_patches.py .upstream/DEEIX-Chat
