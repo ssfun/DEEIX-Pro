@@ -1,0 +1,1324 @@
+diff --git a/backend/docs/docs.go b/backend/docs/docs.go
+index ac03d51..5658642 100644
+--- a/backend/docs/docs.go
++++ b/backend/docs/docs.go
+@@ -16275,6 +16275,7 @@ const docTemplate = `{
+                 "periodCreditUSD",
+                 "permissionGroupID",
+                 "prices",
++                "quotaRefreshInterval",
+                 "sortOrder"
+             ],
+             "properties": {
+@@ -16313,6 +16314,13 @@ const docTemplate = `{
+                         "$ref": "#/definitions/BillingPriceResponse"
+                     }
+                 },
++                "quotaRefreshInterval": {
++                    "type": "string",
++                    "enum": [
++                        "day",
++                        "month"
++                    ]
++                },
+                 "sortOrder": {
+                     "type": "integer"
+                 }
+@@ -26338,6 +26346,13 @@ const docTemplate = `{
+                 "permissionGroupID": {
+                     "type": "integer",
+                     "x-nullable": true
++                },
++                "quotaRefreshInterval": {
++                    "type": "string",
++                    "enum": [
++                        "day",
++                        "month"
++                    ]
+                 }
+             }
+         },
+diff --git a/backend/docs/swagger.json b/backend/docs/swagger.json
+index 5efb42e..76e008e 100644
+--- a/backend/docs/swagger.json
++++ b/backend/docs/swagger.json
+@@ -16268,6 +16268,7 @@
+                 "periodCreditUSD",
+                 "permissionGroupID",
+                 "prices",
++                "quotaRefreshInterval",
+                 "sortOrder"
+             ],
+             "properties": {
+@@ -16306,6 +16307,13 @@
+                         "$ref": "#/definitions/BillingPriceResponse"
+                     }
+                 },
++                "quotaRefreshInterval": {
++                    "type": "string",
++                    "enum": [
++                        "day",
++                        "month"
++                    ]
++                },
+                 "sortOrder": {
+                     "type": "integer"
+                 }
+@@ -26331,6 +26339,13 @@
+                 "permissionGroupID": {
+                     "type": "integer",
+                     "x-nullable": true
++                },
++                "quotaRefreshInterval": {
++                    "type": "string",
++                    "enum": [
++                        "day",
++                        "month"
++                    ]
+                 }
+             }
+         },
+diff --git a/backend/docs/swagger.yaml b/backend/docs/swagger.yaml
+index a59a245..b2bf0c9 100644
+--- a/backend/docs/swagger.yaml
++++ b/backend/docs/swagger.yaml
+@@ -1143,6 +1143,11 @@ definitions:
+         items:
+           $ref: '#/definitions/BillingPriceResponse'
+         type: array
++      quotaRefreshInterval:
++        enum:
++        - day
++        - month
++        type: string
+       sortOrder:
+         type: integer
+     required:
+@@ -1156,6 +1161,7 @@ definitions:
+     - periodCreditUSD
+     - permissionGroupID
+     - prices
++    - quotaRefreshInterval
+     - sortOrder
+     type: object
+   BillingPlanResponseDoc:
+@@ -8192,6 +8198,11 @@ definitions:
+       permissionGroupID:
+         type: integer
+         x-nullable: true
++      quotaRefreshInterval:
++        enum:
++        - day
++        - month
++        type: string
+     required:
+     - amountUSD
+     - billingInterval
+diff --git a/backend/internal/application/billing/pro_quota_refresh_test.go b/backend/internal/application/billing/pro_quota_refresh_test.go
+new file mode 100644
+index 0000000..f02596b
+--- /dev/null
++++ b/backend/internal/application/billing/pro_quota_refresh_test.go
+@@ -0,0 +1,49 @@
++package billing
++
++import (
++	"context"
++	"errors"
++	domainbilling "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/domain/billing"
++	"testing"
++	"time"
++)
++
++func TestProUpdateQuotaCadencePreservesOldClientValue(t *testing.T) {
++	for _, interval := range []string{"", "day", "month", "year"} {
++		repo := &billingRepositoryStub{plans: []domainbilling.Plan{{ID: 2, Code: "pro", QuotaRefreshInterval: "day"}}}
++		service := NewService(repo)
++		service.SetPermissionGroupLookup(permissionGroupLookupStub{validIDs: map[uint]struct{}{1: {}}, defaultIDs: []uint{1}})
++		view, err := service.UpdatePlan(context.Background(), 2, PlanUpdateInput{Name: "Pro", BillingInterval: "year", QuotaRefreshInterval: interval, PeriodCreditNanousd: 500})
++		if interval == "year" {
++			if !errors.Is(err, ErrInvalidBillingPlan) {
++				t.Fatalf("invalid cadence: %v", err)
++			}
++			continue
++		}
++		if err != nil {
++			t.Fatal(err)
++		}
++		want := interval
++		if want == "" {
++			want = "day"
++		}
++		if repo.updatedPlan.QuotaRefreshInterval != want || view.QuotaRefreshInterval != want || repo.updatedPrice.BillingInterval != "year" {
++			t.Fatalf("cadence/subscription coupled: %+v", view)
++		}
++	}
++}
++
++func TestProDailySettlementKeepsAdmissionPeriod(t *testing.T) {
++	start := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local)
++	end := start.AddDate(0, 0, 1)
++	repo := &billingRepositoryStub{mode: "period"}
++	auth := &domainbilling.UsageAuthorization{Mode: "period", Reservation: &domainbilling.UsageBalanceReservation{Mode: "period", PeriodStartAt: &start, PeriodEndAt: &end, PeriodLimitNanousd: 500}}
++	usage := &domainbilling.UsageLedger{UserID: 1, BillingAt: end.Add(-time.Second), UsageDate: start, BilledNanousd: 100}
++	// No current-plan lookup: a midnight rollover or subsequent plan edit cannot move this charge.
++	if err := NewService(repo).RecordUsageWithAuthorization(context.Background(), usage, auth); err != nil {
++		t.Fatal(err)
++	}
++	if !repo.periodStartAt.Equal(start) || !repo.periodEndAt.Equal(end) || repo.periodCreditNanousd != 500 {
++		t.Fatal("settlement changed the admission snapshot")
++	}
++}
+diff --git a/backend/internal/application/billing/service.go b/backend/internal/application/billing/service.go
+index fe1edb8..f549bb0 100644
+--- a/backend/internal/application/billing/service.go
++++ b/backend/internal/application/billing/service.go
+@@ -319,13 +319,14 @@ type resolvedTieredPricingTier struct {
+ 
+ // PlanUpdateInput 定义周期套餐保存入参。
+ type PlanUpdateInput struct {
+-	Name                string
+-	Description         string
+-	PeriodCreditNanousd int64
+-	Currency            string
+-	AmountCents         int64
+-	BillingInterval     string
+-	PermissionGroupID   *uint
++	Name                 string
++	Description          string
++	PeriodCreditNanousd  int64
++	QuotaRefreshInterval string
++	Currency             string
++	AmountCents          int64
++	BillingInterval      string
++	PermissionGroupID    *uint
+ }
+ 
+ // PaymentOrderInput 定义创建支付单入参。
+@@ -554,16 +555,17 @@ func (s *Service) ListPlans(ctx context.Context) ([]BillingPlanView, error) {
+ 	results := make([]BillingPlanView, 0, len(plans))
+ 	for _, item := range plans {
+ 		results = append(results, BillingPlanView{
+-			ID:                  item.ID,
+-			Code:                item.Code,
+-			Name:                item.Name,
+-			Description:         item.Description,
+-			FeatureJSON:         item.FeatureJSON,
+-			PeriodCreditNanousd: item.PeriodCreditNanousd,
+-			SortOrder:           item.SortOrder,
+-			IsActive:            item.IsActive,
+-			PermissionGroupID:   item.PermissionGroupID,
+-			Prices:              priceMap[item.ID],
++			ID:                   item.ID,
++			Code:                 item.Code,
++			Name:                 item.Name,
++			Description:          item.Description,
++			FeatureJSON:          item.FeatureJSON,
++			PeriodCreditNanousd:  item.PeriodCreditNanousd,
++			QuotaRefreshInterval: domainbilling.NormalizeQuotaRefreshInterval(item.QuotaRefreshInterval),
++			SortOrder:            item.SortOrder,
++			IsActive:             item.IsActive,
++			PermissionGroupID:    item.PermissionGroupID,
++			Prices:               priceMap[item.ID],
+ 		})
+ 	}
+ 
+@@ -1083,16 +1085,24 @@ func (s *Service) UpdatePlan(ctx context.Context, planID uint, input PlanUpdateI
+ 		return nil, err
+ 	}
+ 
++	quotaInterval := strings.TrimSpace(input.QuotaRefreshInterval)
++	if quotaInterval == "" {
++		quotaInterval = domainbilling.NormalizeQuotaRefreshInterval(current.QuotaRefreshInterval)
++	}
++	if quotaInterval != "day" && quotaInterval != "month" {
++		return nil, ErrInvalidBillingPlan
++	}
+ 	plan := &domainbilling.Plan{
+-		ID:                  current.ID,
+-		Code:                current.Code,
+-		Name:                textutil.FirstNonEmpty(input.Name, current.Name),
+-		Description:         strings.TrimSpace(input.Description),
+-		FeatureJSON:         current.FeatureJSON,
+-		PeriodCreditNanousd: clampNonNegative(input.PeriodCreditNanousd),
+-		SortOrder:           current.SortOrder,
+-		IsActive:            true,
+-		PermissionGroupID:   permissionGroupID,
++		QuotaRefreshInterval: quotaInterval,
++		ID:                   current.ID,
++		Code:                 current.Code,
++		Name:                 textutil.FirstNonEmpty(input.Name, current.Name),
++		Description:          strings.TrimSpace(input.Description),
++		FeatureJSON:          current.FeatureJSON,
++		PeriodCreditNanousd:  clampNonNegative(input.PeriodCreditNanousd),
++		SortOrder:            current.SortOrder,
++		IsActive:             true,
++		PermissionGroupID:    permissionGroupID,
+ 	}
+ 	price := &domainbilling.Price{
+ 		PlanID:          current.ID,
+@@ -1107,15 +1117,16 @@ func (s *Service) UpdatePlan(ctx context.Context, planID uint, input PlanUpdateI
+ 		return nil, mapPlanMutationError(err)
+ 	}
+ 	return &BillingPlanView{
+-		ID:                  plan.ID,
+-		Code:                plan.Code,
+-		Name:                plan.Name,
+-		Description:         plan.Description,
+-		FeatureJSON:         plan.FeatureJSON,
+-		PeriodCreditNanousd: plan.PeriodCreditNanousd,
+-		SortOrder:           plan.SortOrder,
+-		IsActive:            plan.IsActive,
+-		PermissionGroupID:   plan.PermissionGroupID,
++		ID:                   plan.ID,
++		Code:                 plan.Code,
++		Name:                 plan.Name,
++		Description:          plan.Description,
++		FeatureJSON:          plan.FeatureJSON,
++		PeriodCreditNanousd:  plan.PeriodCreditNanousd,
++		QuotaRefreshInterval: domainbilling.NormalizeQuotaRefreshInterval(plan.QuotaRefreshInterval),
++		SortOrder:            plan.SortOrder,
++		IsActive:             plan.IsActive,
++		PermissionGroupID:    plan.PermissionGroupID,
+ 		Prices: []BillingPriceView{
+ 			{
+ 				PlanID:          plan.ID,
+@@ -1476,7 +1487,6 @@ func (s *Service) currentPeriodPlan(
+ 	userID uint,
+ 	now time.Time,
+ ) (domainbilling.Plan, time.Time, time.Time, error) {
+-	monthStart, monthEnd := monthBounds(now)
+ 	subscriptions, planMap, err := s.listSubscriptionEntitlements(ctx, []uint{userID}, now)
+ 	if err != nil {
+ 		return domainbilling.Plan{}, time.Time{}, time.Time{}, err
+@@ -1487,13 +1497,15 @@ func (s *Service) currentPeriodPlan(
+ 		if planErr != nil {
+ 			return domainbilling.Plan{}, time.Time{}, time.Time{}, planErr
+ 		}
+-		return *plan, monthStart, monthEnd, nil
++		start, end := domainbilling.QuotaPeriodBounds(now, plan.QuotaRefreshInterval)
++		return *plan, start, end, nil
+ 	}
+ 	plan, ok := planMap[subscription.PlanID]
+ 	if !ok {
+ 		return domainbilling.Plan{}, time.Time{}, time.Time{}, repository.ErrNotFound
+ 	}
+-	return plan, monthStart, monthEnd, nil
++	start, end := domainbilling.QuotaPeriodBounds(now, plan.QuotaRefreshInterval)
++	return plan, start, end, nil
+ }
+ 
+ func (s *Service) listSubscriptionEntitlements(
+@@ -1651,14 +1663,15 @@ func subscriptionEndsAfter(left domainbilling.Subscription, right domainbilling.
+ 
+ func toBillingPlanView(plan domainbilling.Plan) BillingPlanView {
+ 	return BillingPlanView{
+-		ID:                  plan.ID,
+-		Code:                plan.Code,
+-		Name:                plan.Name,
+-		Description:         plan.Description,
+-		FeatureJSON:         plan.FeatureJSON,
+-		PeriodCreditNanousd: plan.PeriodCreditNanousd,
+-		SortOrder:           plan.SortOrder,
+-		IsActive:            plan.IsActive,
++		ID:                   plan.ID,
++		Code:                 plan.Code,
++		Name:                 plan.Name,
++		Description:          plan.Description,
++		FeatureJSON:          plan.FeatureJSON,
++		PeriodCreditNanousd:  plan.PeriodCreditNanousd,
++		QuotaRefreshInterval: domainbilling.NormalizeQuotaRefreshInterval(plan.QuotaRefreshInterval),
++		SortOrder:            plan.SortOrder,
++		IsActive:             plan.IsActive,
+ 	}
+ }
+ 
+@@ -2770,8 +2783,19 @@ func (s *Service) ListDailyUsage(ctx context.Context, userID uint, days int, now
+ 	return results, nil
+ }
+ 
+-// ListCurrentCycleDailyUsage 查询当前注册锚定月周期的每日用量聚合。
++// ListCurrentCycleDailyUsage uses the quota window in period mode and the existing reporting window otherwise.
+ func (s *Service) ListCurrentCycleDailyUsage(ctx context.Context, userID uint, now time.Time) ([]domainbilling.UsageDailySummary, error) {
++	mode, err := s.repo.GetBillingMode(ctx)
++	if err != nil {
++		return nil, err
++	}
++	if mode == "period" {
++		_, start, end, err := s.currentPeriodPlan(ctx, userID, now)
++		if err != nil {
++			return nil, err
++		}
++		return s.listDailyUsageBetween(ctx, userID, start, end)
++	}
+ 	createdAt, err := s.repo.GetUserCreatedAt(ctx, userID)
+ 	if err != nil {
+ 		return nil, err
+@@ -2913,14 +2937,15 @@ func (s *Service) GetBillingOverview(ctx context.Context, userID uint, now time.
+ 		remainingNanousd = 0
+ 	}
+ 	planView := BillingPlanView{
+-		ID:                  plan.ID,
+-		Code:                plan.Code,
+-		Name:                plan.Name,
+-		Description:         plan.Description,
+-		FeatureJSON:         plan.FeatureJSON,
+-		PeriodCreditNanousd: plan.PeriodCreditNanousd,
+-		SortOrder:           plan.SortOrder,
+-		IsActive:            plan.IsActive,
++		ID:                   plan.ID,
++		Code:                 plan.Code,
++		Name:                 plan.Name,
++		Description:          plan.Description,
++		FeatureJSON:          plan.FeatureJSON,
++		PeriodCreditNanousd:  plan.PeriodCreditNanousd,
++		QuotaRefreshInterval: domainbilling.NormalizeQuotaRefreshInterval(plan.QuotaRefreshInterval),
++		SortOrder:            plan.SortOrder,
++		IsActive:             plan.IsActive,
+ 	}
+ 	prices, priceErr := s.repo.ListActivePricesByPlanIDs(ctx, []uint{plan.ID})
+ 	if priceErr != nil {
+diff --git a/backend/internal/application/billing/service_model_identity_test.go b/backend/internal/application/billing/service_model_identity_test.go
+index a4f6b0c..32abd0b 100644
+--- a/backend/internal/application/billing/service_model_identity_test.go
++++ b/backend/internal/application/billing/service_model_identity_test.go
+@@ -453,8 +453,8 @@ func (r *billingRepositoryStub) SumTotalBilledNanousd(context.Context, uint) (in
+ }
+ 
+ func TestRecordUsageWithAuthorizationUsesBillingAtForPeriod(t *testing.T) {
+-	billingAt := time.Date(2026, 6, 30, 23, 59, 58, 0, time.UTC)
+-	usageDate := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
++	billingAt := time.Date(2026, 6, 30, 23, 59, 58, 0, time.Local)
++	usageDate := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+ 	endAt := billingAt.Add(24 * time.Hour)
+ 	repo := &billingRepositoryStub{
+ 		mode: "period",
+diff --git a/backend/internal/application/billing/view.go b/backend/internal/application/billing/view.go
+index 03285d0..a65484c 100644
+--- a/backend/internal/application/billing/view.go
++++ b/backend/internal/application/billing/view.go
+@@ -19,16 +19,17 @@ type BillingPriceView struct {
+ 
+ // BillingPlanView 表示套餐结果。
+ type BillingPlanView struct {
+-	ID                  uint
+-	Code                string
+-	Name                string
+-	Description         string
+-	FeatureJSON         string
+-	PeriodCreditNanousd int64
+-	SortOrder           int
+-	IsActive            bool
+-	PermissionGroupID   *uint
+-	Prices              []BillingPriceView
++	ID                   uint
++	Code                 string
++	Name                 string
++	Description          string
++	FeatureJSON          string
++	PeriodCreditNanousd  int64
++	QuotaRefreshInterval string
++	SortOrder            int
++	IsActive             bool
++	PermissionGroupID    *uint
++	Prices               []BillingPriceView
+ }
+ 
+ // BillingOverview 表示当前用户计费概览。
+diff --git a/backend/internal/domain/billing/pro_quota_refresh_test.go b/backend/internal/domain/billing/pro_quota_refresh_test.go
+new file mode 100644
+index 0000000..cb89d73
+--- /dev/null
++++ b/backend/internal/domain/billing/pro_quota_refresh_test.go
+@@ -0,0 +1,42 @@
++package billing
++
++import (
++	"testing"
++	"time"
++)
++
++func TestProQuotaCalendarBoundaries(t *testing.T) {
++	original := time.Local
++	t.Cleanup(func() { time.Local = original })
++	time.Local = time.FixedZone("UTC+8", 8*60*60)
++	now := time.Date(2028, 2, 28, 16, 30, 0, 0, time.UTC)
++	start, end := QuotaPeriodBounds(now, "day")
++	if start.Format(time.RFC3339) != "2028-02-29T00:00:00+08:00" || end.Format(time.RFC3339) != "2028-03-01T00:00:00+08:00" {
++		t.Fatalf("daily: %v .. %v", start, end)
++	}
++	for _, interval := range []string{"month", ""} {
++		start, end = QuotaPeriodBounds(now, interval)
++		if start.Format("2006-01-02") != "2028-02-01" || end.Format("2006-01-02") != "2028-03-01" {
++			t.Fatalf("monthly: %v .. %v", start, end)
++		}
++	}
++	atBoundary, _ := QuotaPeriodBounds(end, "day")
++	if !atBoundary.Equal(end) {
++		t.Fatal("quota boundary must belong to the next period")
++	}
++	loc, err := time.LoadLocation("America/New_York")
++	if err != nil {
++		t.Fatal(err)
++	}
++	time.Local = loc
++	for _, tc := range []struct {
++		month time.Month
++		day   int
++		hours time.Duration
++	}{{3, 8, 23}, {11, 1, 25}} {
++		start, end = QuotaPeriodBounds(time.Date(2026, tc.month, tc.day, 12, 0, 0, 0, loc), "day")
++		if end.Sub(start) != tc.hours*time.Hour || start.Hour() != 0 || end.Hour() != 0 {
++			t.Fatalf("DST: %v .. %v", start, end)
++		}
++	}
++}
+diff --git a/backend/internal/domain/billing/types.go b/backend/internal/domain/billing/types.go
+index 40a9f69..a4c2b9e 100644
+--- a/backend/internal/domain/billing/types.go
++++ b/backend/internal/domain/billing/types.go
+@@ -54,19 +54,43 @@ func NormalizeInterval(value string) string {
+ 	}
+ }
+ 
++// NormalizeQuotaRefreshInterval preserves monthly behavior for existing plans.
++func NormalizeQuotaRefreshInterval(value string) string {
++	if strings.TrimSpace(value) == "day" {
++		return "day"
++	}
++	return "month"
++}
++
++// QuotaPeriodBounds uses server-local calendar boundaries, independently of subscription duration.
++func QuotaPeriodBounds(now time.Time, interval string) (time.Time, time.Time) {
++	if now.IsZero() {
++		now = time.Now()
++	}
++	now = now.In(time.Local)
++	year, month, day := now.Date()
++	if NormalizeQuotaRefreshInterval(interval) == "day" {
++		start := time.Date(year, month, day, 0, 0, 0, 0, now.Location())
++		return start, start.AddDate(0, 0, 1)
++	}
++	start := time.Date(year, month, 1, 0, 0, 0, 0, now.Location())
++	return start, start.AddDate(0, 1, 0)
++}
++
+ // Plan 表示订阅套餐。
+ type Plan struct {
+-	ID                  uint
+-	Code                string
+-	Name                string
+-	Description         string
+-	FeatureJSON         string
+-	PeriodCreditNanousd int64
+-	SortOrder           int
+-	IsActive            bool
+-	PermissionGroupID   *uint
+-	CreatedAt           time.Time
+-	UpdatedAt           time.Time
++	ID                   uint
++	Code                 string
++	Name                 string
++	Description          string
++	FeatureJSON          string
++	PeriodCreditNanousd  int64
++	QuotaRefreshInterval string
++	SortOrder            int
++	IsActive             bool
++	PermissionGroupID    *uint
++	CreatedAt            time.Time
++	UpdatedAt            time.Time
+ }
+ 
+ // Price 表示套餐价格版本。
+diff --git a/backend/internal/infra/persistence/models/billing.go b/backend/internal/infra/persistence/models/billing.go
+index 8f48017..d5afbdc 100644
+--- a/backend/internal/infra/persistence/models/billing.go
++++ b/backend/internal/infra/persistence/models/billing.go
+@@ -14,14 +14,15 @@ const (
+ // BillingPlan 定义订阅等级本身，不直接承载价格周期。
+ type BillingPlan struct {
+ 	BaseModel
+-	Code                string `gorm:"size:32;not null;uniqueIndex:idx_billing_plans_code;comment:套餐编码"`
+-	Name                string `gorm:"size:64;not null;default:'';comment:套餐名称"`
+-	Description         string `gorm:"size:255;not null;default:'';comment:套餐说明"`
+-	FeatureJSON         string `gorm:"type:text;not null;default:'';comment:能力配置JSON"`
+-	PeriodCreditNanousd int64  `gorm:"not null;default:0;comment:周期用量额度(纳美元)"`
+-	SortOrder           int    `gorm:"not null;default:0;comment:排序权重"`
+-	IsActive            bool   `gorm:"not null;default:false;index:idx_billing_plans_active;comment:是否启用"`
+-	PermissionGroupID   *uint  `gorm:"index:idx_billing_plans_perm_group;comment:绑定的权限组ID"`
++	Code                 string `gorm:"size:32;not null;uniqueIndex:idx_billing_plans_code;comment:套餐编码"`
++	Name                 string `gorm:"size:64;not null;default:'';comment:套餐名称"`
++	Description          string `gorm:"size:255;not null;default:'';comment:套餐说明"`
++	FeatureJSON          string `gorm:"type:text;not null;default:'';comment:能力配置JSON"`
++	PeriodCreditNanousd  int64  `gorm:"not null;default:0;comment:周期用量额度(纳美元)"`
++	QuotaRefreshInterval string `gorm:"size:16;not null;default:month;comment:配额刷新周期(day/month)"`
++	SortOrder            int    `gorm:"not null;default:0;comment:排序权重"`
++	IsActive             bool   `gorm:"not null;default:false;index:idx_billing_plans_active;comment:是否启用"`
++	PermissionGroupID    *uint  `gorm:"index:idx_billing_plans_perm_group;comment:绑定的权限组ID"`
+ }
+ 
+ // TableName 指定表名。
+diff --git a/backend/internal/infra/persistence/postgres/billing/pro_quota_refresh_test.go b/backend/internal/infra/persistence/postgres/billing/pro_quota_refresh_test.go
+new file mode 100644
+index 0000000..8d6175c
+--- /dev/null
++++ b/backend/internal/infra/persistence/postgres/billing/pro_quota_refresh_test.go
+@@ -0,0 +1,232 @@
++package billing
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	appbilling "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/application/billing"
++	domainbilling "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/domain/billing"
++	model "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/infra/persistence/models"
++	"github.com/DEEIX-AI/DEEIX-Chat/backend/internal/repository"
++	"testing"
++	"time"
++)
++
++func TestProQuotaPlanMigrationAndPersistence(t *testing.T) {
++	db := openBillingSQLiteTestDB(t)
++	if err := db.AutoMigrate(&model.BillingPlan{}, &model.BillingPrice{}); err != nil {
++		t.Fatal(err)
++	}
++	plan := model.BillingPlan{Code: "pro", Name: "Pro", IsActive: true, PeriodCreditNanousd: 500}
++	if err := db.Create(&plan).Error; err != nil {
++		t.Fatal(err)
++	}
++	// Simulate a pre-feature database, then run the same model migration used by startup.
++	if err := db.Migrator().DropColumn(&model.BillingPlan{}, "quota_refresh_interval"); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.AutoMigrate(&model.BillingPlan{}); err != nil {
++		t.Fatal(err)
++	}
++	repo := NewRepo(db)
++	ctx := context.Background()
++	got, err := repo.GetPlanByID(ctx, plan.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.QuotaRefreshInterval != "month" {
++		t.Fatalf("migration default: %+v", got)
++	}
++	got.QuotaRefreshInterval = "day"
++	price := &domainbilling.Price{PlanID: plan.ID, Code: "pro-default", BillingInterval: "year", Currency: "USD", IsDefault: true, IsActive: true}
++	if err := repo.UpdatePlanWithDefaultPrice(ctx, got, price); err != nil {
++		t.Fatal(err)
++	}
++	got, err = NewRepo(db).GetPlanByID(ctx, plan.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	prices, err := repo.ListActivePricesByPlanIDs(ctx, []uint{plan.ID})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.QuotaRefreshInterval != "day" || len(prices) != 1 || prices[0].BillingInterval != "year" {
++		t.Fatalf("round trip: %+v %+v", got, prices)
++	}
++}
++
++func TestProDailyQuotaOverviewWithoutRollover(t *testing.T) {
++	for _, interval := range []string{"month", "year", "lifetime"} {
++		t.Run(interval, func(t *testing.T) {
++			db := openBillingSQLiteTestDB(t)
++			if err := db.AutoMigrate(&model.BillingPlan{}, &model.BillingPrice{}, &model.Subscription{}, &model.SystemSetting{}); err != nil {
++				t.Fatal(err)
++			}
++			repo := NewRepo(db)
++			ctx := context.Background()
++			service := appbilling.NewService(repo)
++			now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.Local)
++			start, end := domainbilling.QuotaPeriodBounds(now, "day")
++			plan := model.BillingPlan{Code: "pro", Name: "Pro", IsActive: true, QuotaRefreshInterval: "day", PeriodCreditNanousd: 500}
++			if err := db.Create(&plan).Error; err != nil {
++				t.Fatal(err)
++			}
++			price := model.BillingPrice{PlanID: plan.ID, Code: "pro-default", BillingInterval: interval, Currency: "USD", IsActive: true, IsDefault: true}
++			if err := db.Create(&price).Error; err != nil {
++				t.Fatal(err)
++			}
++			expiry := now.AddDate(0, 1, 0)
++			sub := model.Subscription{UserID: 1, PlanID: plan.ID, PriceID: price.ID, Status: "active", StartAt: start.AddDate(0, 0, -2), CurrentPeriodStartAt: start.AddDate(0, 0, -2), CurrentPeriodEndAt: &expiry}
++			if interval == "lifetime" {
++				sub.CurrentPeriodEndAt = nil
++			}
++			if err := db.Create(&sub).Error; err != nil {
++				t.Fatal(err)
++			}
++			if err := db.Create(&model.SystemSetting{Namespace: "billing", Key: "mode", Value: "period"}).Error; err != nil {
++				t.Fatal(err)
++			}
++			for _, row := range []model.UsageLedger{
++				{UserID: 1, BillingAt: start.Add(-time.Second), UsageDate: start.AddDate(0, 0, -1), BilledNanousd: 400},
++				{UserID: 1, BillingAt: start, UsageDate: start, BilledNanousd: 120},
++				{UserID: 1, BillingAt: now, UsageDate: start, BilledNanousd: 800, IsFreeModel: true},
++				{UserID: 2, BillingAt: now, UsageDate: start, BilledNanousd: 800},
++			} {
++				if err := db.Create(&row).Error; err != nil {
++					t.Fatal(err)
++				}
++			}
++			overview, err := service.GetBillingOverview(ctx, 1, now)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if overview.PeriodUsedNanousd != 120 || overview.PeriodRemainingNanousd != 380 || !overview.PeriodEndAt.Equal(end) || overview.Plan.QuotaRefreshInterval != "day" {
++				t.Fatalf("daily overview: %+v", overview)
++			}
++			daily, dailyErr := service.ListCurrentCycleDailyUsage(ctx, 1, now)
++			if dailyErr != nil || len(daily) != 1 {
++				t.Fatalf("quota daily report: %v %v", daily, dailyErr)
++			}
++			tomorrow, err := service.GetBillingOverview(ctx, 1, end)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if tomorrow.PeriodRemainingNanousd != 500 || tomorrow.PeriodUsedNanousd != 0 {
++				t.Fatalf("daily credit rolled over: %+v", tomorrow)
++			}
++			if err := db.Model(&plan).Update("quota_refresh_interval", "month").Error; err != nil {
++				t.Fatal(err)
++			}
++			monthly, err := service.GetBillingOverview(ctx, 1, now)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if monthly.PeriodUsedNanousd != 520 || monthly.PeriodRemainingNanousd != 0 || monthly.PeriodStartAt.Day() != 1 {
++				t.Fatalf("monthly reset ignored prior consumption: %+v", monthly)
++			}
++			var stored model.Subscription
++			if err := db.First(&stored, sub.ID).Error; err != nil {
++				t.Fatal(err)
++			}
++			if (stored.CurrentPeriodEndAt == nil) != (sub.CurrentPeriodEndAt == nil) {
++				t.Fatal("quota refresh altered subscription")
++			}
++			if stored.CurrentPeriodEndAt != nil && !stored.CurrentPeriodEndAt.Equal(expiry) {
++				t.Fatal("quota refresh changed expiry")
++			}
++		})
++	}
++}
++
++func TestProDailyReservationSettlementAcrossMidnight(t *testing.T) {
++	db := openBillingSQLiteTestDB(t)
++	repo := NewRepo(db)
++	ctx := context.Background()
++	today, tomorrow := domainbilling.QuotaPeriodBounds(time.Now(), "day")
++	yesterday := today.AddDate(0, 0, -1)
++	req := domainbilling.UsageBalanceReservationRequest{UserID: 1, Mode: "period", RefNo: "yesterday", RequestedNanousd: 100, PeriodStartAt: &yesterday, PeriodEndAt: &today, PeriodCreditNanousd: 500}
++	reservation, err := repo.ReserveUsageBalance(ctx, req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// The old request was admitted yesterday and finishes after midnight.
++	if err := db.Model(&model.UsageReservation{}).Where("id = ?", reservation.ID).Update("created_at", today.Add(-time.Second)).Error; err != nil {
++		t.Fatal(err)
++	}
++	usage := &domainbilling.UsageLedger{UserID: 1, RefNo: "yesterday", BillingAt: today.Add(-time.Second), UsageDate: yesterday, BilledNanousd: 400}
++	if err := repo.AddPeriodUsageAndSettleOverage(ctx, usage, yesterday, today, 500, reservation); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.AddPeriodUsageAndSettleOverage(ctx, usage, yesterday, today, 500, reservation); err != nil {
++		t.Fatal(err)
++	}
++	used, err := repo.SumBillableNanousd(ctx, 1, yesterday, today)
++	if err != nil || used != 400 {
++		t.Fatalf("old period/idempotency: %d %v", used, err)
++	}
++	used, err = repo.SumBillableNanousd(ctx, 1, today, tomorrow)
++	if err != nil || used != 0 {
++		t.Fatalf("new day charged for yesterday: %d %v", used, err)
++	}
++	req.RefNo = "today"
++	req.PeriodStartAt = &today
++	req.PeriodEndAt = &tomorrow
++	req.RequestedNanousd = 500
++	fresh, err := repo.ReserveUsageBalance(ctx, req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if fresh.PeriodCreditNanousd != 500 || fresh.BalanceNanousd != 0 {
++		t.Fatalf("new day quota: %+v", fresh)
++	}
++}
++
++func TestProQuotaCadenceChangeIncludesInFlightReservations(t *testing.T) {
++	for _, from := range []string{"day", "month"} {
++		t.Run(from, func(t *testing.T) {
++			db := openBillingSQLiteTestDB(t)
++			repo := NewRepo(db)
++			ctx := context.Background()
++			to := "day"
++			if from == "day" {
++				to = "month"
++			}
++			start, end := domainbilling.QuotaPeriodBounds(time.Now(), from)
++			req := domainbilling.UsageBalanceReservationRequest{UserID: 1, Mode: "period", RefNo: "before", RequestedNanousd: 100, PeriodStartAt: &start, PeriodEndAt: &end, PeriodCreditNanousd: 100}
++			if _, err := repo.ReserveUsageBalance(ctx, req); err != nil {
++				t.Fatal(err)
++			}
++			start, end = domainbilling.QuotaPeriodBounds(time.Now(), to)
++			req.RefNo = "after"
++			if _, err := repo.ReserveUsageBalance(ctx, req); !errors.Is(err, repository.ErrInsufficientBalance) {
++				t.Fatalf("reused reserved quota across %s -> %s: %v", from, to, err)
++			}
++		})
++	}
++}
++
++func TestProConcurrentDailyAdmissionCannotDoubleSpend(t *testing.T) {
++	db := openBillingSQLiteTestDB(t)
++	repo := NewRepo(db)
++	ctx := context.Background()
++	start, end := domainbilling.QuotaPeriodBounds(time.Now(), "day")
++	results := make(chan error, 2)
++	for i := 0; i < 2; i++ {
++		go func(index int) {
++			_, err := repo.ReserveUsageBalance(ctx, domainbilling.UsageBalanceReservationRequest{UserID: 1, Mode: "period", RefNo: fmt.Sprintf("daily-%d", index), RequestedNanousd: 500, PeriodStartAt: &start, PeriodEndAt: &end, PeriodCreditNanousd: 500})
++			results <- err
++		}(i)
++	}
++	successes := 0
++	for i := 0; i < 2; i++ {
++		err := <-results
++		if err == nil {
++			successes++
++		} else if !errors.Is(err, repository.ErrInsufficientBalance) {
++			t.Fatal(err)
++		}
++	}
++	if successes != 1 {
++		t.Fatalf("successful full-budget admissions: %d", successes)
++	}
++}
+diff --git a/backend/internal/infra/persistence/postgres/billing/repository.go b/backend/internal/infra/persistence/postgres/billing/repository.go
+index d67293f..aaad682 100644
+--- a/backend/internal/infra/persistence/postgres/billing/repository.go
++++ b/backend/internal/infra/persistence/postgres/billing/repository.go
+@@ -195,11 +195,12 @@ func (r *Repo) UpdatePlanWithDefaultPrice(ctx context.Context, plan *domainbilli
+ 	}
+ 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+ 		planUpdates := map[string]any{
+-			"name":                  strings.TrimSpace(plan.Name),
+-			"description":           strings.TrimSpace(plan.Description),
+-			"period_credit_nanousd": clampNonNegative(plan.PeriodCreditNanousd),
+-			"is_active":             true,
+-			"permission_group_id":   plan.PermissionGroupID,
++			"name":                   strings.TrimSpace(plan.Name),
++			"description":            strings.TrimSpace(plan.Description),
++			"period_credit_nanousd":  clampNonNegative(plan.PeriodCreditNanousd),
++			"quota_refresh_interval": domainbilling.NormalizeQuotaRefreshInterval(plan.QuotaRefreshInterval),
++			"is_active":              true,
++			"permission_group_id":    plan.PermissionGroupID,
+ 		}
+ 		if err := tx.Model(&model.BillingPlan{}).
+ 			Where("id = ?", plan.ID).
+@@ -3078,16 +3079,17 @@ func minInt64(a int64, b int64) int64 {
+ 
+ func toPlanDomain(item model.BillingPlan) domainbilling.Plan {
+ 	return domainbilling.Plan{
+-		ID:                  item.ID,
+-		Code:                item.Code,
+-		Name:                item.Name,
+-		Description:         item.Description,
+-		FeatureJSON:         item.FeatureJSON,
+-		PeriodCreditNanousd: item.PeriodCreditNanousd,
+-		SortOrder:           item.SortOrder,
+-		IsActive:            item.IsActive,
+-		PermissionGroupID:   item.PermissionGroupID,
+-		CreatedAt:           item.CreatedAt,
+-		UpdatedAt:           item.UpdatedAt,
++		ID:                   item.ID,
++		Code:                 item.Code,
++		Name:                 item.Name,
++		Description:          item.Description,
++		FeatureJSON:          item.FeatureJSON,
++		PeriodCreditNanousd:  item.PeriodCreditNanousd,
++		QuotaRefreshInterval: domainbilling.NormalizeQuotaRefreshInterval(item.QuotaRefreshInterval),
++		SortOrder:            item.SortOrder,
++		IsActive:             item.IsActive,
++		PermissionGroupID:    item.PermissionGroupID,
++		CreatedAt:            item.CreatedAt,
++		UpdatedAt:            item.UpdatedAt,
+ 	}
+ }
+diff --git a/backend/internal/infra/persistence/postgres/billing/repository_reservation.go b/backend/internal/infra/persistence/postgres/billing/repository_reservation.go
+index db65ee9..dc3a4f8 100644
+--- a/backend/internal/infra/persistence/postgres/billing/repository_reservation.go
++++ b/backend/internal/infra/persistence/postgres/billing/repository_reservation.go
+@@ -403,11 +403,14 @@ func sumActivePeriodCreditReservations(
+ 	query := tx.Model(&model.UsageReservation{}).
+ 		Select("COALESCE(SUM(period_credit_nanousd), 0)").
+ 		Where(
+-			"user_id = ? AND ((status = ? AND expires_at > ?) OR status = ?) AND period_start_at = ? AND period_end_at = ?",
++			"user_id = ? AND ((status = ? AND expires_at > ?) OR status = ?) AND mode = ? AND ((period_start_at = ? AND period_end_at = ?) OR (created_at >= ? AND created_at < ?))",
+ 			userID,
+ 			domainbilling.UsageReservationStatusActive,
+ 			now,
+ 			domainbilling.UsageReservationStatusReconciliation,
++			"period",
++			periodStart,
++			periodEnd,
+ 			periodStart,
+ 			periodEnd,
+ 		)
+diff --git a/backend/internal/transport/http/billing/dto.go b/backend/internal/transport/http/billing/dto.go
+index 19192bb..6076f3b 100644
+--- a/backend/internal/transport/http/billing/dto.go
++++ b/backend/internal/transport/http/billing/dto.go
+@@ -107,13 +107,14 @@ type RedeemCodeRequest struct {
+ 
+ // UpdateBillingPlanRequest 保存周期套餐。
+ type UpdateBillingPlanRequest struct {
+-	Name              string   `json:"name" binding:"required,min=1,max=64"`
+-	Description       *string  `json:"description" binding:"required,max=255"`
+-	PeriodCreditUSD   *float64 `json:"periodCreditUSD" binding:"required,gte=0"`
+-	Currency          string   `json:"currency,omitempty" binding:"omitempty,max=16"`
+-	AmountUSD         *float64 `json:"amountUSD" binding:"required,gte=0"`
+-	BillingInterval   string   `json:"billingInterval" binding:"required,oneof=month year lifetime"`
+-	PermissionGroupID *uint    `json:"permissionGroupID,omitempty" extensions:"x-nullable"`
++	Name                 string   `json:"name" binding:"required,min=1,max=64"`
++	Description          *string  `json:"description" binding:"required,max=255"`
++	PeriodCreditUSD      *float64 `json:"periodCreditUSD" binding:"required,gte=0"`
++	QuotaRefreshInterval string   `json:"quotaRefreshInterval,omitempty" binding:"omitempty,oneof=day month"`
++	Currency             string   `json:"currency,omitempty" binding:"omitempty,max=16"`
++	AmountUSD            *float64 `json:"amountUSD" binding:"required,gte=0"`
++	BillingInterval      string   `json:"billingInterval" binding:"required,oneof=month year lifetime"`
++	PermissionGroupID    *uint    `json:"permissionGroupID,omitempty" extensions:"x-nullable"`
+ }
+ 
+ type nullableIntRequest struct {
+@@ -173,17 +174,18 @@ type BillingPriceResponse struct {
+ 
+ // BillingPlanResponse 面向前端的套餐视图响应。
+ type BillingPlanResponse struct {
+-	ID                  uint                   `json:"id"`
+-	Code                string                 `json:"code"`
+-	Name                string                 `json:"name"`
+-	Description         string                 `json:"description"`
+-	FeatureJSON         string                 `json:"featureJSON"`
+-	PeriodCreditUSD     float64                `json:"periodCreditUSD"`
+-	PeriodCreditNanousd int64                  `json:"periodCreditNanousd"`
+-	SortOrder           int                    `json:"sortOrder"`
+-	IsActive            bool                   `json:"isActive"`
+-	PermissionGroupID   *uint                  `json:"permissionGroupID" extensions:"x-nullable,!x-omitempty"`
+-	Prices              []BillingPriceResponse `json:"prices"`
++	ID                   uint                   `json:"id"`
++	Code                 string                 `json:"code"`
++	Name                 string                 `json:"name"`
++	Description          string                 `json:"description"`
++	FeatureJSON          string                 `json:"featureJSON"`
++	PeriodCreditUSD      float64                `json:"periodCreditUSD"`
++	PeriodCreditNanousd  int64                  `json:"periodCreditNanousd"`
++	QuotaRefreshInterval string                 `json:"quotaRefreshInterval" enums:"day,month"`
++	SortOrder            int                    `json:"sortOrder"`
++	IsActive             bool                   `json:"isActive"`
++	PermissionGroupID    *uint                  `json:"permissionGroupID" extensions:"x-nullable,!x-omitempty"`
++	Prices               []BillingPriceResponse `json:"prices"`
+ }
+ 
+ // SubscriptionResponse 面向前端的订阅视图响应。
+@@ -722,17 +724,18 @@ func toPlanListResponse(views []appbilling.BillingPlanView) []BillingPlanRespons
+ 			})
+ 		}
+ 		result = append(result, BillingPlanResponse{
+-			ID:                  v.ID,
+-			Code:                v.Code,
+-			Name:                v.Name,
+-			Description:         v.Description,
+-			FeatureJSON:         v.FeatureJSON,
+-			PeriodCreditUSD:     nanousdToUSD(v.PeriodCreditNanousd),
+-			PeriodCreditNanousd: v.PeriodCreditNanousd,
+-			SortOrder:           v.SortOrder,
+-			IsActive:            v.IsActive,
+-			PermissionGroupID:   v.PermissionGroupID,
+-			Prices:              prices,
++			ID:                   v.ID,
++			Code:                 v.Code,
++			Name:                 v.Name,
++			Description:          v.Description,
++			FeatureJSON:          v.FeatureJSON,
++			PeriodCreditUSD:      nanousdToUSD(v.PeriodCreditNanousd),
++			PeriodCreditNanousd:  v.PeriodCreditNanousd,
++			QuotaRefreshInterval: domainbilling.NormalizeQuotaRefreshInterval(v.QuotaRefreshInterval),
++			SortOrder:            v.SortOrder,
++			IsActive:             v.IsActive,
++			PermissionGroupID:    v.PermissionGroupID,
++			Prices:               prices,
+ 		})
+ 	}
+ 	return result
+@@ -1181,13 +1184,14 @@ func modelPricingInputFromRequest(req UpsertModelPricingRequest) appbilling.Mode
+ 
+ func planUpdateInputFromRequest(req UpdateBillingPlanRequest) appbilling.PlanUpdateInput {
+ 	return appbilling.PlanUpdateInput{
+-		Name:                req.Name,
+-		Description:         *req.Description,
+-		PeriodCreditNanousd: usdToNanousd(*req.PeriodCreditUSD),
+-		Currency:            req.Currency,
+-		AmountCents:         usdToCents(*req.AmountUSD),
+-		BillingInterval:     req.BillingInterval,
+-		PermissionGroupID:   req.PermissionGroupID,
++		Name:                 req.Name,
++		Description:          *req.Description,
++		PeriodCreditNanousd:  usdToNanousd(*req.PeriodCreditUSD),
++		QuotaRefreshInterval: req.QuotaRefreshInterval,
++		Currency:             req.Currency,
++		AmountCents:          usdToCents(*req.AmountUSD),
++		BillingInterval:      req.BillingInterval,
++		PermissionGroupID:    req.PermissionGroupID,
+ 	}
+ }
+ 
+diff --git a/backend/internal/transport/http/billing/handler.go b/backend/internal/transport/http/billing/handler.go
+index 9e143df..c22e111 100644
+--- a/backend/internal/transport/http/billing/handler.go
++++ b/backend/internal/transport/http/billing/handler.go
+@@ -778,11 +778,12 @@ func (h *Handler) UpdatePlan(c *gin.Context) {
+ 		"billing_plan",
+ 		strconv.FormatUint(planID, 10),
+ 		map[string]any{
+-			"plan_id":           planID,
+-			"name":              req.Name,
+-			"period_credit_usd": *req.PeriodCreditUSD,
+-			"amount_usd":        *req.AmountUSD,
+-			"billing_interval":  req.BillingInterval,
++			"plan_id":                planID,
++			"name":                   req.Name,
++			"period_credit_usd":      *req.PeriodCreditUSD,
++			"quota_refresh_interval": item.QuotaRefreshInterval,
++			"amount_usd":             *req.AmountUSD,
++			"billing_interval":       req.BillingInterval,
+ 		},
+ 	)
+ 
+diff --git a/backend/internal/transport/http/billing/pro_quota_refresh_test.go b/backend/internal/transport/http/billing/pro_quota_refresh_test.go
+new file mode 100644
+index 0000000..27e2ce7
+--- /dev/null
++++ b/backend/internal/transport/http/billing/pro_quota_refresh_test.go
+@@ -0,0 +1,33 @@
++package billing
++
++import (
++	"encoding/json"
++	appbilling "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/application/billing"
++	"github.com/gin-gonic/gin/binding"
++	"testing"
++)
++
++func TestProQuotaRefreshTransport(t *testing.T) {
++	for _, interval := range []string{"day", "month", "", "year", "invalid"} {
++		var req UpdateBillingPlanRequest
++		raw := `{"name":"Pro","description":"test","amountUSD":20,"periodCreditUSD":5,"billingInterval":"month","quotaRefreshInterval":"` + interval + `"}`
++		if err := json.Unmarshal([]byte(raw), &req); err != nil {
++			t.Fatal(err)
++		}
++		err := binding.Validator.ValidateStruct(req)
++		if (err == nil) != (interval == "day" || interval == "month" || interval == "") {
++			t.Fatalf("interval %q: %v", interval, err)
++		}
++		if err == nil && planUpdateInputFromRequest(req).QuotaRefreshInterval != interval {
++			t.Fatal("request lost quota interval")
++		}
++		req.BillingInterval = "day"
++		if binding.Validator.ValidateStruct(req) == nil {
++			t.Fatal("daily subscription must not be accepted")
++		}
++	}
++	result := toPlanListResponse([]appbilling.BillingPlanView{{QuotaRefreshInterval: "day"}})
++	if len(result) != 1 || result[0].QuotaRefreshInterval != "day" {
++		t.Fatal("response lost quota interval")
++	}
++}
+diff --git a/frontend/features/admin/components/sections/billing/billing-dialogs.tsx b/frontend/features/admin/components/sections/billing/billing-dialogs.tsx
+index 55bd47f..26799ba 100644
+--- a/frontend/features/admin/components/sections/billing/billing-dialogs.tsx
++++ b/frontend/features/admin/components/sections/billing/billing-dialogs.tsx
+@@ -181,6 +181,19 @@ export function PlanBillingDialog({
+                         </SelectContent>
+                       </Select>
+                     </div>
++                    <div className="space-y-1">
++                      <p className="text-xs text-muted-foreground">{t("plans.quotaRefreshInterval")}</p>
++                      <Select value={planForm.quotaRefreshInterval} onValueChange={(value) => setPlanForm({ ...planForm, quotaRefreshInterval: value === "day" ? "day" : "month" })}>
++                        <SelectTrigger aria-label={t("plans.quotaRefreshInterval")}>
++                          <SelectValue />
++                        </SelectTrigger>
++                        <SelectContent>
++                          <SelectItem value="day">{t("plans.quotaIntervals.day")}</SelectItem>
++                          <SelectItem value="month">{t("plans.quotaIntervals.month")}</SelectItem>
++                        </SelectContent>
++                      </Select>
++                      <p className="text-xs text-muted-foreground">{t("plans.quotaRefreshHint")}</p>
++                    </div>
+                     <div className="space-y-1">
+                       <p className="text-xs text-muted-foreground">{t("plans.periodCredit")}</p>
+                       <Input value={planForm.periodCredit} type="number" min="0" step="0.01" onChange={(event) => setPlanForm({ ...planForm, periodCredit: event.target.value })} />
+diff --git a/frontend/features/admin/components/sections/billing/billing-plan.tsx b/frontend/features/admin/components/sections/billing/billing-plan.tsx
+index d2eb365..34d29ca 100644
+--- a/frontend/features/admin/components/sections/billing/billing-plan.tsx
++++ b/frontend/features/admin/components/sections/billing/billing-plan.tsx
+@@ -49,6 +49,7 @@ export function BillingPlanSection({ plans, setPlans, permissionGroups, loading
+         amountUSD: parsePrice(planForm.amount),
+         currency: "USD",
+         billingInterval: planForm.billingInterval,
++        quotaRefreshInterval: planForm.quotaRefreshInterval,
+         periodCreditUSD: parsePrice(planForm.periodCredit),
+         permissionGroupID: Number(planForm.permissionGroupID) || undefined,
+       });
+diff --git a/frontend/features/admin/components/sections/billing/billing-tables.tsx b/frontend/features/admin/components/sections/billing/billing-tables.tsx
+index cabb499..b9f75b5 100644
+--- a/frontend/features/admin/components/sections/billing/billing-tables.tsx
++++ b/frontend/features/admin/components/sections/billing/billing-tables.tsx
+@@ -74,7 +74,7 @@ export function PeriodBillingTable({
+                   <TableCell className="py-1.5">
+                     <span>
+                       {formatCreditUSD(plan.periodCreditUSD)}
+-                      <span className="ml-1 text-xs text-muted-foreground">{t("plans.perPeriod")}</span>
++                      <span className="ml-1 text-xs text-muted-foreground">{t(plan.quotaRefreshInterval === "day" ? "plans.perDay" : "plans.perMonth")}</span>
+                     </span>
+                   </TableCell>
+                   <TableCell stickyEnd className="w-[56px] py-1.5 text-right">
+diff --git a/frontend/features/admin/model/billing-settings.ts b/frontend/features/admin/model/billing-settings.ts
+index b53ad7a..bb58bc3 100644
+--- a/frontend/features/admin/model/billing-settings.ts
++++ b/frontend/features/admin/model/billing-settings.ts
+@@ -46,6 +46,7 @@ export type PlanFormState = {
+   description: string;
+   amount: string;
+   billingInterval: string;
++  quotaRefreshInterval: "day" | "month";
+   periodCredit: string;
+   permissionGroupID: string;
+ };
+@@ -265,6 +266,7 @@ export function createPlanFormState(plan: AdminBillingPlanDTO, defaultPermission
+     description: plan.description || "",
+     amount: String((defaultPrice?.amountCents ?? 0) / 100),
+     billingInterval: defaultPrice?.billingInterval || "month",
++    quotaRefreshInterval: plan.quotaRefreshInterval === "day" ? "day" : "month",
+     periodCredit: String(plan.periodCreditUSD ?? 0),
+     permissionGroupID,
+   };
+diff --git a/frontend/features/settings/components/sections/subscription/settings-subscription.tsx b/frontend/features/settings/components/sections/subscription/settings-subscription.tsx
+index 05ded1c..e3e48f2 100644
+--- a/frontend/features/settings/components/sections/subscription/settings-subscription.tsx
++++ b/frontend/features/settings/components/sections/subscription/settings-subscription.tsx
+@@ -157,6 +157,7 @@ export function SettingsSubscription() {
+   const planFeatureLabels = React.useMemo(
+     () => ({
+       monthlyCredit: (credit: string) => t("plans.features.monthlyCredit", { credit }),
++      dailyCredit: (credit: string) => t("plans.features.dailyCredit", { credit }),
+       freeModelsNotIncluded: t("plans.features.freeModelsNotIncluded"),
+     }),
+     [t],
+@@ -220,6 +221,47 @@ export function SettingsSubscription() {
+     };
+   }, [accessToken, resolveErrorMessage, t, user]);
+ 
++  React.useEffect(() => {
++    const end = Date.parse(billingOverview?.periodEndAt ?? "");
++    if (!Number.isFinite(end)) return;
++    let disposed = false;
++    let pending = false;
++    let timer: ReturnType<typeof setTimeout>;
++    const refresh = async () => {
++      if (disposed || pending) return;
++      if (Date.now() < end) {
++        timer = setTimeout(() => { void refresh(); }, Math.min(end - Date.now() + 250, 86_400_000));
++        return;
++      }
++      pending = true;
++      try {
++        const [data, daily] = await Promise.all([getBillingOverview(accessToken), listBillingDailyUsage(accessToken)]);
++        if (!disposed && Date.parse(data.overview?.periodEndAt ?? "") > end) {
++          setBillingOverview(data.overview);
++          setDailyUsage(daily ?? []);
++        }
++      } catch {
++        // Retry below without interrupting the current page.
++      } finally {
++        pending = false;
++        if (!disposed) timer = setTimeout(() => { void refresh(); }, 60_000);
++      }
++    };
++    const onVisible = () => {
++      if (document.visibilityState === "visible" && Date.now() >= end) {
++        clearTimeout(timer);
++        void refresh();
++      }
++    };
++    timer = setTimeout(() => { void refresh(); }, Math.min(Math.max(end - Date.now() + 250, 1_000), 86_400_000));
++    document.addEventListener("visibilitychange", onVisible);
++    return () => {
++      disposed = true;
++      clearTimeout(timer);
++      document.removeEventListener("visibilitychange", onVisible);
++    };
++  }, [accessToken, billingOverview]);
++
+   const loadUsageLogs = React.useCallback(async (page: number, pageSize: number, query: string, status: string, sort: string) => {
+     setUsageLoading(true);
+     try {
+diff --git a/frontend/features/settings/components/sections/subscription/subscription-summary.tsx b/frontend/features/settings/components/sections/subscription/subscription-summary.tsx
+index 7dd6b26..29f5029 100644
+--- a/frontend/features/settings/components/sections/subscription/subscription-summary.tsx
++++ b/frontend/features/settings/components/sections/subscription/subscription-summary.tsx
+@@ -51,6 +51,7 @@ type SubscriptionEntitlementQueueLabels = {
+ 
+ type PlanFeatureLabels = {
+   monthlyCredit: (credit: string) => string;
++  dailyCredit: (credit: string) => string;
+   freeModelsNotIncluded: string;
+ };
+ 
+@@ -310,7 +311,7 @@ export function SubscriptionSummary({
+                 <p className="text-xs font-medium">{t("currentSubscription.title")}</p>
+                 <p className="truncate text-sm font-semibold">{currentPlan?.name ?? t("currentSubscription.none")}</p>
+                 <p className="text-xs text-muted-foreground">
+-                  {currentPlan ? `${formatPlanPrice(currentPrice, intervalLabels, billingDisplay)} · ${t("plans.features.monthlyCredit", { credit: formatPlanCredit(periodCredit, billingDisplay) })}` : t("currentSubscription.empty")}
++                  {currentPlan ? `${formatPlanPrice(currentPrice, intervalLabels, billingDisplay)} · ${t(currentPlan.quotaRefreshInterval === "day" ? "plans.features.dailyCredit" : "plans.features.monthlyCredit", { credit: formatPlanCredit(periodCredit, billingDisplay) })}` : t("currentSubscription.empty")}
+                 </p>
+               </div>
+               <div className="flex shrink-0 items-center gap-2">
+@@ -344,6 +345,12 @@ export function SubscriptionSummary({
+                     ? `${formatShortDate(billingOverview.periodStartAt, locale)} - ${formatShortDate(billingOverview.periodEndAt, locale)}`
+                     : t("periodUsage.currentPeriod")}
+                 </p>
++                <p className="text-xs text-muted-foreground">
++                  {t(currentPlan?.quotaRefreshInterval === "day" ? "periodUsage.daily" : "periodUsage.monthly")}
++                  {billingOverview?.periodEndAt ? ` · ${t("periodUsage.nextRefresh", {
++                    time: new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "long" }).format(new Date(billingOverview.periodEndAt)),
++                  })}` : ""}
++                </p>
+               </div>
+               <p className="shrink-0 text-xs font-medium text-muted-foreground">{Math.round(periodPercent)}%</p>
+             </div>
+diff --git a/frontend/features/settings/model/subscription-format.ts b/frontend/features/settings/model/subscription-format.ts
+index 40752e1..6e5db03 100644
+--- a/frontend/features/settings/model/subscription-format.ts
++++ b/frontend/features/settings/model/subscription-format.ts
+@@ -308,11 +308,11 @@ export function resolveEPayTypeLabel(type: string, labels: { alipay: string; wxp
+ 
+ export function resolvePlanFeatures(
+   plan: BillingPlanDTO,
+-  labels: { monthlyCredit: (credit: string) => string; freeModelsNotIncluded: string },
++  labels: { monthlyCredit: (credit: string) => string; dailyCredit: (credit: string) => string; freeModelsNotIncluded: string },
+   billingDisplay: BillingDisplayOptions = DEFAULT_BILLING_DISPLAY,
+ ): string[] {
+   const fallback = [
+-    labels.monthlyCredit(formatPlanCredit(plan.periodCreditUSD, billingDisplay)),
++    (plan.quotaRefreshInterval === "day" ? labels.dailyCredit : labels.monthlyCredit)(formatPlanCredit(plan.periodCreditUSD, billingDisplay)),
+     labels.freeModelsNotIncluded,
+   ];
+   try {
+diff --git a/frontend/i18n/messages/en-US/admin-billing.json b/frontend/i18n/messages/en-US/admin-billing.json
+index f30ae23..0f62b1e 100644
+--- a/frontend/i18n/messages/en-US/admin-billing.json
++++ b/frontend/i18n/messages/en-US/admin-billing.json
+@@ -62,7 +62,12 @@
+     "name": "Name",
+     "description": "Description",
+     "price": "Price",
+-    "interval": "Interval",
++    "interval": "Subscription interval",
++    "quotaRefreshInterval": "Quota refresh interval",
++    "quotaRefreshHint": "Refreshes at midnight in the server time zone, on the 1st for monthly quotas. Unused credit does not roll over.",
++    "quotaIntervals": {"day": "Daily", "month": "Monthly"},
++    "perDay": "/ day",
++    "perMonth": "/ month",
+     "periodCredit": "Period credit",
+     "permissionGroup": "Permission group",
+     "permissionGroupDescription": "Users subscribed to this plan automatically gain this permission group's model access.",
+diff --git a/frontend/i18n/messages/en-US/settings.json b/frontend/i18n/messages/en-US/settings.json
+index b1e4bee..4cf154d 100644
+--- a/frontend/i18n/messages/en-US/settings.json
++++ b/frontend/i18n/messages/en-US/settings.json
+@@ -477,6 +477,9 @@
+       "subscribe": "Subscribe"
+     },
+     "periodUsage": {
++      "daily": "Daily refresh · no rollover",
++      "monthly": "Monthly refresh · no rollover",
++      "nextRefresh": "Next refresh: {time}",
+       "title": "Plan usage",
+       "currentPeriod": "Current billing period",
+       "used": "Used {value}",
+@@ -616,6 +619,7 @@
+         "freeBlocked": "Base plan"
+       },
+       "features": {
++        "dailyCredit": "{credit} daily credit",
+         "monthlyCredit": "{credit} monthly credit",
+         "freeModelsNotIncluded": "Free models do not count toward the credit."
+       }
+diff --git a/frontend/i18n/messages/zh-CN/admin-billing.json b/frontend/i18n/messages/zh-CN/admin-billing.json
+index 5638703..e140bcf 100644
+--- a/frontend/i18n/messages/zh-CN/admin-billing.json
++++ b/frontend/i18n/messages/zh-CN/admin-billing.json
+@@ -62,7 +62,12 @@
+     "name": "名称",
+     "description": "说明",
+     "price": "价格",
+-    "interval": "周期",
++    "interval": "订阅周期",
++    "quotaRefreshInterval": "配额刷新周期",
++    "quotaRefreshHint": "按服务器时区零点刷新，月额度在每月 1 日刷新；未用完额度不结转。",
++    "quotaIntervals": {"day": "按日", "month": "按月"},
++    "perDay": "/ 日",
++    "perMonth": "/ 月",
+     "periodCredit": "周期用量额度",
+     "permissionGroup": "权限组",
+     "permissionGroupDescription": "订阅此套餐的用户自动获得该权限组的模型访问权限。",
+diff --git a/frontend/i18n/messages/zh-CN/settings.json b/frontend/i18n/messages/zh-CN/settings.json
+index aee95e3..38b4f41 100644
+--- a/frontend/i18n/messages/zh-CN/settings.json
++++ b/frontend/i18n/messages/zh-CN/settings.json
+@@ -477,8 +477,11 @@
+       "subscribe": "订阅"
+     },
+     "periodUsage": {
++      "daily": "每日刷新 · 不结转",
++      "monthly": "每月刷新 · 不结转",
++      "nextRefresh": "下次刷新：{time}",
+       "title": "套餐使用情况",
+-      "currentPeriod": "当前计费周期",
++      "currentPeriod": "当前配额周期",
+       "used": "已使用 {value}",
+       "total": "总额度 {value}"
+     },
+@@ -616,6 +619,7 @@
+         "freeBlocked": "基础方案"
+       },
+       "features": {
++        "dailyCredit": "{credit} 日额度",
+         "monthlyCredit": "{credit} 月额度",
+         "freeModelsNotIncluded": "免费模型不计入额度"
+       }
+diff --git a/packages/api-contract/src/types.generated.ts b/packages/api-contract/src/types.generated.ts
+index 33ec53b..14e505f 100644
+--- a/packages/api-contract/src/types.generated.ts
++++ b/packages/api-contract/src/types.generated.ts
+@@ -464,6 +464,7 @@ export interface BillingPlanResponse {
+   periodCreditUSD: number;
+   permissionGroupID: number | null;
+   prices: BillingPriceResponse[];
++  quotaRefreshInterval: "day" | "month";
+   sortOrder: number;
+ }
+ 
+@@ -3623,6 +3624,7 @@ export interface UpdateBillingPlanRequest {
+   /** @min 0 */
+   periodCreditUSD: number;
+   permissionGroupID?: number | null;
++  quotaRefreshInterval?: "day" | "month";
+ }
+ 
+ export interface UpdateConversationLabelsRequest {

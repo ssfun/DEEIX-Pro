@@ -34,11 +34,11 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(snapshot(), patched)
             subprocess.run(['git', '-C', directory, 'apply', '--reverse', *[str(p) for p in sorted((ROOT / 'patches').glob('*.patch'), reverse=True)]], check=True)
             self.assertEqual(snapshot(), before)
-            # Upgrade an existing checkout that only has the original day patch.
-            subprocess.run(['git', '-C', directory, 'apply', str(ROOT / 'patches/0001-subscription-day.patch')], check=True)
-            day_only = snapshot()
+            # Upgrade an existing checkout that only has the quota refresh patch.
+            subprocess.run(['git', '-C', directory, 'apply', str(ROOT / 'patches/0001-quota-refresh.patch')], check=True)
+            quota_only = snapshot()
             self.assertEqual(run('--check').returncode, 0)
-            self.assertEqual(snapshot(), day_only)
+            self.assertEqual(snapshot(), quota_only)
             self.assertEqual(run().returncode, 0)
             self.assertEqual(snapshot(), patched)
             subprocess.run(['git', '-C', directory, 'apply', '--reverse', *[str(p) for p in sorted((ROOT / 'patches').glob('*.patch'), reverse=True)]], check=True)
