@@ -79,6 +79,7 @@ CI 和发布均在开始时查询上游最新正式 Release，解析标签对应
 
 - **Validate DEEIX-Pro**：PR、推送 `main` 或手动触发；执行补丁、计费、API 契约及类型检查，再分别在原生 amd64／arm64 runner 上构建 Docker 镜像。构建后验证 cloudflared 二进制、环境变量及容器退出行为。CI 不发布镜像，PR 不需要 Docker Hub 凭证。
 - **Publish Docker Hub**：推送 `v*` 标签或手动触发；先通过同一套验证，再构建并推送两种架构，按本次构建的 digest 合并为多架构镜像。某一架构失败时不发布最终标签。
+- **每日自动发布**：北京时间每天 **08:00**（UTC `0 0 * * *`）运行 **Publish Docker Hub**，检查上游最新正式 Release。若本仓库已有同名、非草稿 Release，则跳过验证和构建；否则应用 patch、验证并发布双架构镜像，更新版本标签和 `latest`，最后创建本仓库的 GitHub Release，记录上游与 Pro 提交。任一步骤失败都不会创建成功标记，下次定时检查会重试。首次启用时，若尚无同名 Release，会发布当前上游最新版。定时工作流需合入默认分支才生效，GitHub 调度可能延迟。
 
 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 配置：
 
@@ -88,7 +89,16 @@ CI 和发布均在开始时查询上游最新正式 Release，解析标签对应
 | Secret | `DOCKERHUB_TOKEN` | 对目标镜像仓库有写入权限的访问令牌 |
 | Variable（可选） | `DOCKERHUB_IMAGE` | `命名空间/镜像名`，例如 `ssfun/deeix-pro`；默认是用户名加当前 GitHub 仓库名的小写形式 |
 
-在 Actions 中手动运行 **Publish Docker Hub** 即可构建上游最新版。推送本仓库的 `v*` 标签仍可触发发布，但该标签仅作为触发入口，不影响镜像版本号。只有手动勾选 `publish_latest` 才额外更新 `latest`。
+在 Actions 中手动运行 **Publish Docker Hub** 即可构建上游最新版。推送本仓库的 `v*` 标签仍可触发发布，但该标签仅作为触发入口，不影响镜像版本号。手动运行时勾选 `publish_latest` 才额外更新 `latest`；每日自动发布会更新 `latest` 并创建 GitHub Release。手动和标签触发仍可重建已发布版本，不受每日去重检查限制。
+
+可重复验证定时发布的 shell 步骤（使用本地 GitHub CLI 替身，不调用真实发布 API）：
+
+```bash
+python3 tests/test_scheduled_release.py /tmp/deeix-scheduled-release-results.json
+actionlint .github/workflows/*.yml
+```
+
+JSON 产物记录新版本、已发布版本、草稿、API 失败、手动／标签重建及 Release 创建成功／失败场景；实际定时调度和镜像发布仍由 GitHub Actions 执行。
 
 例如上游最新 Release 是 `v0.4.2`，发布结果就是 `ssfun/deeix-pro:v0.4.2`。同一上游版本下修改补丁并重新发布，会更新该版本标签；镜像内的 Pro 提交元数据可区分具体构建。
 

@@ -1,5 +1,8 @@
 name: Publish Docker Hub
 on:
+  schedule:
+    # 08:00 Asia/Shanghai (GitHub Actions cron uses UTC).
+    - cron: '0 0 * * *'
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -16,14 +19,47 @@ concurrency:
 jobs:
   resolve:
     uses: ./.github/workflows/resolve-upstream.yml
-  validate:
+  check:
     needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - name: Check whether publication is needed
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != schedule ]]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Query all pages; API/auth failures must stop rather than look like an update.
+          gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft == false) | .tag_name' > "$RUNNER_TEMP/published-tags"
+          if grep -Fxq -- "$TAG" "$RUNNER_TEMP/published-tags"; then
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            echo "Already released: $TAG; skipping publication." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+            echo "New upstream release: $TAG; applying patches and publishing." >> "$GITHUB_STEP_SUMMARY"
+          fi
+  validate:
+    needs: [resolve, check]
+    if: needs.check.outputs.publish == 'true'
     uses: ./.github/workflows/validate.yml
     with:
       upstream_sha: ${{ needs.resolve.outputs.sha }}
       upstream_tag: ${{ needs.resolve.outputs.tag }}
   metadata:
-    needs: resolve
+    needs: [resolve, check]
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -131,7 +167,7 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.image }}
           TAG: ${{ needs.resolve.outputs.tag }}
-          PUBLISH_LATEST: ${{ inputs.publish_latest == true }}
+          PUBLISH_LATEST: ${{ github.event_name == 'schedule' || inputs.publish_latest == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -148,3 +184,41 @@ jobs:
           docker buildx imagetools create "${tags[@]}" "${sources[@]}"
           docker buildx imagetools inspect "$IMAGE:$TAG"
           echo "Published: \`$IMAGE:$TAG\` (linux/amd64, linux/arm64)" >> "$GITHUB_STEP_SUMMARY"
+  release:
+    needs: [resolve, publish]
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/resolve-dockerhub-image
+        id: image
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          image: ${{ vars.DOCKERHUB_IMAGE }}
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          UPSTREAM_SHA: ${{ needs.resolve.outputs.sha }}
+          PRO_SHA: ${{ github.sha }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Markdown backticks below are literal, not command substitutions.
+          # shellcheck disable=SC2016
+          {
+            printf 'Automatically patched and validated upstream release **%s**.\n\n' "$TAG"
+            printf -- '- Upstream commit: `%s`\n' "$UPSTREAM_SHA"
+            printf -- '- Pro commit: `%s`\n' "$PRO_SHA"
+            printf -- '- Docker image: `%s:%s` and `%s:latest`\n' "$IMAGE" "$TAG" "$IMAGE"
+            printf -- '- Platforms: `linux/amd64`, `linux/arm64`\n'
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" --repo "$GH_REPO" --target "$PRO_SHA" \
+            --title "DEEIX-Pro $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"

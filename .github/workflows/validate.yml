@@ -24,6 +24,14 @@ jobs:
           upstream_tag: ${{ inputs.upstream_tag }}
       - name: Test release resolution
         run: python3 -m unittest discover -s tests -p 'test_resolve_upstream.py'
+      - name: Test scheduled release workflow steps
+        run: python3 tests/test_scheduled_release.py "$RUNNER_TEMP/scheduled-release-results.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scheduled-release-results
+          path: ${{ runner.temp }}/scheduled-release-results.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Test patch application and drift refusal
         run: python3 tests/test_apply.py .upstream/DEEIX-Chat
       - uses: pnpm/action-setup@v4
